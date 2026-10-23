@@ -1,12 +1,26 @@
+
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { Search, Users, Award, LogOut, Loader2, Store, Phone } from 'lucide-react';
-import { collection, getDocs, query, orderBy } from 'firebase/firestore';
+import {
+  Search,
+  Users,
+  Award,
+  LogOut,
+  Loader2,
+  Store,
+  Phone,
+  RefreshCw,
+  AlertCircle,
+} from 'lucide-react';
+import {
+  collection,
+  getDocs,
+  query,
+  orderBy,
+} from 'firebase/firestore';
 import { db } from '@/lib/firebase/client';
-
-export const dynamic = 'force-dynamic';
 
 interface Participant {
   id: string;
@@ -18,170 +32,320 @@ interface Participant {
   time: string;
 }
 
+function formatTimestamp(timestamp: unknown): string {
+  if (!timestamp) return 'N/A';
+
+  try {
+    let date: Date;
+
+    if (
+      typeof timestamp === 'object' &&
+      timestamp !== null &&
+      'toDate' in timestamp &&
+      typeof timestamp.toDate === 'function'
+    ) {
+      date = timestamp.toDate();
+    } else if (
+      typeof timestamp === 'object' &&
+      timestamp !== null &&
+      'seconds' in timestamp &&
+      typeof timestamp.seconds === 'number'
+    ) {
+      date = new Date(timestamp.seconds * 1000);
+    } else if (
+      timestamp instanceof Date ||
+      typeof timestamp === 'string' ||
+      typeof timestamp === 'number'
+    ) {
+      date = new Date(timestamp);
+    } else {
+      return 'N/A';
+    }
+
+    if (Number.isNaN(date.getTime())) return 'N/A';
+
+    return date.toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return 'N/A';
+  }
+}
+
 export default function AdminDashboardPage() {
   const router = useRouter();
+
+  const [mounted, setMounted] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
   useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  const fetchParticipants = useCallback(async () => {
+    if (!mounted) return;
+
     const isAuth = sessionStorage.getItem('isAdminAuthenticated');
+
     if (!isAuth) {
-      router.push('/admin/login');
+      router.replace('/admin/login');
       return;
     }
 
-    // Fetch real spin records from Firestore
-    const fetchParticipants = async () => {
-      try {
-        const q = query(collection(db, 'spins'), orderBy('timestamp', 'desc'));
-        const querySnapshot = await getDocs(q);
-        const data: Participant[] = [];
-        
-        querySnapshot.forEach((docSnap) => {
-          const item = docSnap.data();
-          data.push({
-            id: docSnap.id,
-            customerName: item.customerName || item.customerId || 'Customer',
-            phoneNumber: item.phoneNumber || item.invoiceId || 'N/A',
-            billAmount: item.billAmount || 0,
-            storeName: item.storeName || 'General',
-            wonPrize: item.prize?.name || item.wonPrize || 'Voucher',
-            time: item.timestamp ? new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'N/A',
-          });
-        });
+    setLoading(true);
+    setError('');
 
-        setParticipants(data);
-      } catch (err) {
-        console.error('Error fetching participants:', err);
-      } finally {
-        setLoading(false);
-      }
-    };
+    try {
+      const spinsQuery = query(
+        collection(db, 'spins'),
+        orderBy('timestamp', 'desc')
+      );
+
+      const snapshot = await getDocs(spinsQuery);
+
+      const data: Participant[] = snapshot.docs.map((docSnap) => {
+        const item = docSnap.data();
+        const amount = Number(item.billAmount ?? 0);
+
+        return {
+          id: docSnap.id,
+          customerName: String(
+            item.customerName || item.customerId || 'Customer'
+          ),
+          phoneNumber: String(
+            item.phoneNumber || item.invoiceId || 'N/A'
+          ),
+          billAmount: Number.isFinite(amount) ? amount : 0,
+          storeName: String(item.storeName || 'General'),
+          wonPrize: String(
+            item.prize?.name || item.wonPrize || 'Voucher'
+          ),
+          time: formatTimestamp(item.timestamp),
+        };
+      });
+
+      setParticipants(data);
+    } catch (err) {
+      console.error('Error fetching participants:', err);
+
+      setError(
+        'Unable to load participant records. Check your Firebase configuration, internet connection, and Firestore security rules.'
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, [mounted, router]);
+
+  useEffect(() => {
+    if (!mounted) return;
+
+    const isAuth = sessionStorage.getItem('isAdminAuthenticated');
+
+    if (!isAuth) {
+      router.replace('/admin/login');
+      return;
+    }
 
     fetchParticipants();
-  }, [router]);
+  }, [mounted, router, fetchParticipants]);
 
   const handleLogout = () => {
     sessionStorage.removeItem('isAdminAuthenticated');
-    router.push('/admin/login');
+    router.replace('/admin/login');
   };
 
-  const filteredParticipants = participants.filter((p) => 
-    p.customerName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    p.phoneNumber.includes(searchTerm) ||
-    p.storeName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    p.wonPrize.toLowerCase().includes(searchTerm.toLowerCase())
+  const normalizedSearch = searchTerm.trim().toLowerCase();
+
+  const filteredParticipants = participants.filter((participant) =>
+    participant.customerName.toLowerCase().includes(normalizedSearch) ||
+    participant.phoneNumber.toLowerCase().includes(normalizedSearch) ||
+    participant.storeName.toLowerCase().includes(normalizedSearch) ||
+    participant.wonPrize.toLowerCase().includes(normalizedSearch)
   );
 
   return (
-    <main className="min-h-screen w-full bg-[#0d0f14] text-[#f3f4f6] flex flex-col justify-between">
-      
-      {/* Top Header */}
-      <header className="w-full bg-[#141721] border-b border-[#D4AF37]/40 px-4 py-3 flex justify-between items-center sticky top-0 z-20 shadow-md">
+    <main className="min-h-screen w-full bg-[#0d0f14] text-[#f3f4f6] flex flex-col">
+      {/* Header */}
+      <header className="sticky top-0 z-20 flex w-full items-center justify-between border-b border-[#D4AF37]/40 bg-[#141721] px-4 py-3 shadow-md">
         <div>
-          <h1 className="text-lg font-serif tracking-wide text-[#F7E7CE]">Fun Republic</h1>
-          <p className="text-[9px] text-[#D4AF37] uppercase tracking-wider">Live Admin Dashboard</p>
+          <h1 className="font-serif text-lg tracking-wide text-[#F7E7CE]">
+            Fun Republic
+          </h1>
+          <p className="text-[9px] uppercase tracking-wider text-[#D4AF37]">
+            Live Admin Dashboard
+          </p>
         </div>
-        <button 
+
+        <button
           onClick={handleLogout}
-          className="bg-red-950/80 border border-red-500 text-red-200 px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center space-x-1 cursor-pointer hover:bg-red-900 transition"
+          className="flex cursor-pointer items-center space-x-1 rounded-lg border border-red-500 bg-red-950/80 px-3 py-1.5 text-xs font-semibold text-red-200 transition hover:bg-red-900"
         >
           <LogOut size={14} />
           <span>Logout</span>
         </button>
       </header>
 
-      {/* Main Content Area */}
-      <div className="w-full max-w-md mx-auto px-3 py-4 flex-1">
-        
-        {/* Quick Stats */}
-        <div className="grid grid-cols-2 gap-3 mb-4">
-          <div className="bg-[#141721] border border-[#D4AF37]/40 rounded-2xl p-3 shadow">
-            <div className="flex items-center space-x-2 text-[#D4AF37] mb-1">
+      {/* Main content */}
+      <div className="mx-auto w-full max-w-md flex-1 px-3 py-4">
+        {/* Stats */}
+        <div className="mb-4 grid grid-cols-2 gap-3">
+          <div className="rounded-2xl border border-[#D4AF37]/40 bg-[#141721] p-3 shadow">
+            <div className="mb-1 flex items-center space-x-2 text-[#D4AF37]">
               <Users size={16} />
-              <span className="text-[10px] uppercase font-semibold">Total Spins</span>
+              <span className="text-[10px] font-semibold uppercase">
+                Total Spins
+              </span>
             </div>
-            <p className="text-xl font-bold text-white">{participants.length}</p>
+            <p className="text-xl font-bold text-white">
+              {mounted ? participants.length : 0}
+            </p>
           </div>
-          <div className="bg-[#141721] border border-[#D4AF37]/40 rounded-2xl p-3 shadow">
-            <div className="flex items-center space-x-2 text-[#D4AF37] mb-1">
+
+          <div className="rounded-2xl border border-[#D4AF37]/40 bg-[#141721] p-3 shadow">
+            <div className="mb-1 flex items-center space-x-2 text-[#D4AF37]">
               <Award size={16} />
-              <span className="text-[10px] uppercase font-semibold">Prizes Issued</span>
+              <span className="text-[10px] font-semibold uppercase">
+                Prizes Issued
+              </span>
             </div>
-            <p className="text-xl font-bold text-white">{participants.length}</p>
+            <p className="text-xl font-bold text-white">
+              {mounted ? participants.length : 0}
+            </p>
           </div>
         </div>
 
-        {/* Search Bar */}
-        <div className="mb-4 relative">
-          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-[#D4AF37]">
+        {/* Search */}
+        <div className="relative mb-4">
+          <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-[#D4AF37]">
             <Search size={16} />
           </div>
+
           <input
             type="text"
             placeholder="Search by name, phone, store, or prize..."
             value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full pl-10 pr-4 py-2.5 bg-[#141721] border border-[#D4AF37]/40 rounded-xl text-xs text-white placeholder-gray-400 focus:outline-none focus:border-[#D4AF37] shadow-inner"
+            onChange={(event) => setSearchTerm(event.target.value)}
+            className="w-full rounded-xl border border-[#D4AF37]/40 bg-[#141721] py-2.5 pl-10 pr-4 text-xs text-white shadow-inner placeholder-gray-400 focus:border-[#D4AF37] focus:outline-none"
           />
         </div>
 
-        <div className="flex justify-between items-center mb-2 px-1">
-          <h3 className="text-xs font-bold text-[#F7E7CE] uppercase tracking-wider">Live Participant Records</h3>
-          <span className="text-[10px] text-gray-400">{filteredParticipants.length} total</span>
+        {/* Records heading */}
+        <div className="mb-2 flex items-center justify-between px-1">
+          <h3 className="text-xs font-bold uppercase tracking-wider text-[#F7E7CE]">
+            Live Participant Records
+          </h3>
+          <span className="text-[10px] text-gray-400">
+            {mounted ? filteredParticipants.length : 0} total
+          </span>
         </div>
 
-        {/* Participant List */}
-        {loading ? (
-          <div className="flex flex-col items-center justify-center py-12 text-gray-400 space-y-2">
-            <Loader2 className="animate-spin text-[#D4AF37]" size={24} />
-            <span className="text-xs">Loading live data from Firestore...</span>
+        {/* Error */}
+        {error && (
+          <div className="mb-4 rounded-xl border border-red-500/40 bg-red-950/30 p-3">
+            <div className="flex items-start gap-2 text-red-300">
+              <AlertCircle size={18} className="mt-0.5 shrink-0" />
+              <p className="text-xs leading-5">{error}</p>
+            </div>
+
+            <button
+              onClick={fetchParticipants}
+              className="mt-3 flex items-center gap-2 rounded-lg border border-red-400/40 px-3 py-2 text-xs text-red-200 hover:bg-red-900/40"
+            >
+              <RefreshCw size={13} />
+              Try again
+            </button>
           </div>
-        ) : (
+        )}
+
+        {/* Participants */}
+        {!mounted || loading ? (
+          <div className="flex flex-col items-center justify-center space-y-2 py-12 text-gray-400">
+            <Loader2
+              className="animate-spin text-[#D4AF37]"
+              size={24}
+            />
+            <span className="text-xs">
+              Loading live data from Firestore...
+            </span>
+          </div>
+        ) : error ? null : (
           <div className="space-y-2.5 pb-6">
             {filteredParticipants.length > 0 ? (
-              filteredParticipants.map((p) => (
-                <div key={p.id} className="bg-[#141721] border border-[#D4AF37]/30 rounded-2xl p-3 shadow-sm">
-                  <div className="flex justify-between items-start mb-1.5">
-                    <div>
-                      <h4 className="text-xs font-bold text-white">{p.customerName}</h4>
-                      <p className="text-[10px] text-gray-400 flex items-center space-x-1 mt-0.5 font-mono">
-                        <Phone size={10} className="text-[#D4AF37]" />
-                        <span>{p.phoneNumber}</span>
+              filteredParticipants.map((participant) => (
+                <div
+                  key={participant.id}
+                  className="rounded-2xl border border-[#D4AF37]/30 bg-[#141721] p-3 shadow-sm"
+                >
+                  <div className="mb-1.5 flex items-start justify-between">
+                    <div className="min-w-0">
+                      <h4 className="break-words text-xs font-bold text-white">
+                        {participant.customerName}
+                      </h4>
+
+                      <p className="mt-0.5 flex items-center gap-1 font-mono text-[10px] text-gray-400">
+                        <Phone
+                          size={10}
+                          className="shrink-0 text-[#D4AF37]"
+                        />
+                        <span className="break-all">
+                          {participant.phoneNumber}
+                        </span>
                       </p>
                     </div>
-                    <span className="text-[10px] bg-amber-950/60 text-[#F7E7CE] border border-[#D4AF37]/40 px-2 py-0.5 rounded-full font-semibold">
-                      ₹{p.billAmount}
+
+                    <span className="ml-2 shrink-0 rounded-full border border-[#D4AF37]/40 bg-amber-950/60 px-2 py-0.5 text-[10px] font-semibold text-[#F7E7CE]">
+                      ₹{participant.billAmount.toLocaleString('en-IN')}
                     </span>
                   </div>
 
-                  <div className="flex items-center space-x-1 text-[10px] text-gray-300 mb-2">
-                    <Store size={10} className="text-[#D4AF37]" />
-                    <span>Store: <strong className="text-white">{p.storeName}</strong></span>
+                  <div className="mb-2 flex items-center gap-1 text-[10px] text-gray-300">
+                    <Store
+                      size={10}
+                      className="shrink-0 text-[#D4AF37]"
+                    />
+                    <span>
+                      Store:{' '}
+                      <strong className="text-white">
+                        {participant.storeName}
+                      </strong>
+                    </span>
                   </div>
 
-                  <div className="flex justify-between items-center pt-2 border-t border-gray-800 text-[10px]">
-                    <span className="text-[#D4AF37] font-medium">Won: {p.wonPrize}</span>
-                    <span className="text-gray-500">{p.time}</span>
+                  <div className="flex items-start justify-between gap-2 border-t border-gray-800 pt-2 text-[10px]">
+                    <span className="break-words font-medium text-[#D4AF37]">
+                      Won: {participant.wonPrize}
+                    </span>
+                    <span className="shrink-0 text-gray-500">
+                      {participant.time}
+                    </span>
                   </div>
                 </div>
               ))
             ) : (
-              <div className="text-center py-12 text-xs text-gray-400 bg-[#141721]/50 rounded-2xl border border-gray-800">
-                No real spin records found yet.<br />
-                <span className="text-[10px] text-[#D4AF37]">Try completing a test spin on the customer app!</span>
+              <div className="rounded-2xl border border-gray-800 bg-[#141721]/50 py-12 text-center text-xs text-gray-400">
+                {searchTerm.trim()
+                  ? 'No participants match your search.'
+                  : 'No real spin records found yet.'}
+
+                {!searchTerm.trim() && (
+                  <p className="mt-2 text-[10px] text-[#D4AF37]">
+                    Try completing a test spin on the customer app!
+                  </p>
+                )}
               </div>
             )}
           </div>
         )}
-
       </div>
 
-      <footer className="w-full bg-[#141721] border-t border-[#D4AF37]/30 py-2.5 text-center text-[9px] text-gray-400">
+      {/* Footer */}
+      <footer className="w-full border-t border-[#D4AF37]/30 bg-[#141721] py-2.5 text-center text-[9px] text-gray-400">
         Fun Republic Mall, Coimbatore • Secure Admin Panel
       </footer>
-
     </main>
   );
 }
