@@ -22,6 +22,21 @@ export default function RegisterPage() {
       setError('Please fill in all required fields.');
       return;
     }
+
+    // 1. Phone number validation (exactly 10 digits)
+    const phoneRegex = /^\d{10}$/;
+    if (!phoneRegex.test(formData.mobileNumber)) {
+      setError('Please enter a valid 10-digit phone number.');
+      return;
+    }
+
+    // 2. Bill amount validation (minimum ₹3,999)
+    const numericBill = Number(formData.billAmount);
+    if (isNaN(numericBill) || numericBill < 3999) {
+      setError('Not eligible for the bill amount. Minimum bill must be ₹3,999.');
+      return;
+    }
+
     if (!formData.agreed) {
       setError('You must agree to the Terms & Conditions.');
       return;
@@ -31,7 +46,12 @@ export default function RegisterPage() {
     // Clear previous win so a new registration can spin freshly
     sessionStorage.removeItem('wonPrize');
 
-    sessionStorage.setItem('customerData', JSON.stringify(formData));
+    const dataToSave = {
+      ...formData,
+      billAmount: numericBill,
+    };
+
+    sessionStorage.setItem('customerData', JSON.stringify(dataToSave));
     router.push('/spin');
   };
 
@@ -84,7 +104,7 @@ export default function RegisterPage() {
           </div>
 
           {error && (
-            <div className="mb-2.5 p-1.5 bg-red-950/80 border border-red-500 text-red-200 text-[10px] rounded-lg text-center">
+            <div className="mb-2.5 p-1.5 bg-red-950/80 border border-red-500 text-red-200 text-[10px] rounded-lg text-center font-medium animate-shake">
               {error}
             </div>
           )}
@@ -112,13 +132,14 @@ export default function RegisterPage() {
             {/* Bill Amount Input */}
             <div className="bg-[#191d29] border border-[#D4AF37]/40 rounded-xl p-1.5 px-3 focus-within:border-[#D4AF37] transition shadow-inner">
               <label className="block text-[9px] text-[#D4AF37] font-medium tracking-wide">
-                Bill Amount <span className="text-red-500">*</span>
+                Bill Amount <span className="text-red-500">*</span> <span className="text-[8px] text-gray-400">(Min ₹3,999)</span>
               </label>
               <div className="flex items-center space-x-2 mt-0.5">
                 <Coins size={14} className="text-[#D4AF37]/70 shrink-0" />
                 <input
                   type="number"
-                  placeholder="Enter your bill amount"
+                  min="3999"
+                  placeholder="Enter bill amount (e.g. 4000)"
                   value={formData.billAmount}
                   onChange={(e) => setFormData({ ...formData, billAmount: e.target.value })}
                   className="w-full bg-transparent text-xs text-white placeholder-gray-500 focus:outline-none"
@@ -146,16 +167,17 @@ export default function RegisterPage() {
             {/* Mobile Number Input */}
             <div className="bg-[#191d29] border border-[#D4AF37]/40 rounded-xl p-1.5 px-3 focus-within:border-[#D4AF37] transition shadow-inner">
               <label className="block text-[9px] text-[#D4AF37] font-medium tracking-wide">
-                Mobile Number <span className="text-red-500">*</span>
+                Mobile Number (10 Digits) <span className="text-red-500">*</span>
               </label>
               <div className="flex items-center space-x-2 mt-0.5">
                 <Phone size={14} className="text-[#D4AF37]/70 shrink-0" />
                 <input
                   type="tel"
-                  placeholder="Enter your mobile number"
+                  maxLength={10}
+                  placeholder="Enter 10-digit mobile number"
                   value={formData.mobileNumber}
-                  onChange={(e) => setFormData({ ...formData, mobileNumber: e.target.value })}
-                  className="w-full bg-transparent text-xs text-white placeholder-gray-500 focus:outline-none"
+                  onChange={(e) => setFormData({ ...formData, mobileNumber: e.target.value.replace(/\D/g, '').slice(0, 10) })}
+                  className="w-full bg-transparent text-xs text-white placeholder-gray-500 focus:outline-none font-mono"
                 />
               </div>
             </div>

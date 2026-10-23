@@ -1,4 +1,3 @@
-
 'use client';
 
 import React, { useState, useEffect } from 'react';
@@ -25,23 +24,34 @@ export default function ResultPage() {
     const wonPrizeData = sessionStorage.getItem('wonPrize');
     if (wonPrizeData) {
       const prize = JSON.parse(wonPrizeData);
-      if (prize.name) setPrizeName(prize.name);
+      
+      if (prize.name) {
+        setPrizeName(prize.name);
+      }
 
-      // Map prize ID to correct image asset
-      const imageMap: Record<string, string> = {
-        gift_box: '/images/prizes/gift-box.webp',
-        movie_ticket: '/images/prizes/movie-ticket.webp',
-        ice_cream: '/images/prizes/ice-cream.webp',
-        car_wash: '/images/prizes/car-wash.webp',
-        pizza_discount: '/images/prizes/pizza.webp',
-        bbq_lunch: '/images/prizes/bbq-lunch.webp',
-        gaming_points: '/images/prizes/gaming-points.webp',
-        mixer_grinder: '/images/prizes/mixer-grinder.webp',
-        bluetooth_speaker: '/images/prizes/gift-box.webp', // fallback or speaker image if available
-      };
-
-      if (prize.id && imageMap[prize.id]) {
-        setPrizeImage(imageMap[prize.id]);
+      // If the backend object already has an image property, use it
+      if (prize.image) {
+        setPrizeImage(prize.image);
+      } else if (prize.name) {
+        // Fallback robust name-to-image mapping
+        const lower = prize.name.toLowerCase();
+        if (lower.includes('barbeque') || lower.includes('bbq')) {
+          setPrizeImage('/images/prizes/bbq-lunch.webp');
+        } else if (lower.includes('mixer') || lower.includes('grinder')) {
+          setPrizeImage('/images/prizes/mixer-grinder.webp');
+        } else if (lower.includes('movie')) {
+          setPrizeImage('/images/prizes/movie-ticket.webp');
+        } else if (lower.includes('game') || lower.includes('gaming')) {
+          setPrizeImage('/images/prizes/gaming-points.webp');
+        } else if (lower.includes('ice cream')) {
+          setPrizeImage('/images/prizes/ice-cream.webp');
+        } else if (lower.includes('car wash')) {
+          setPrizeImage('/images/prizes/car-wash.webp');
+        } else if (lower.includes('pizza')) {
+          setPrizeImage('/images/prizes/pizza.webp');
+        } else {
+          setPrizeImage('/images/prizes/gift-box.webp'); // Custom Gift / Fallback
+        }
       }
     }
   }, []);

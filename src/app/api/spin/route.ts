@@ -1,170 +1,562 @@
+
 import { NextResponse } from 'next/server';
-import { PRIZES } from '@/config/prizes';
+import { FieldValue } from 'firebase-admin/firestore';
+import { randomInt } from 'node:crypto';
+import { adminDb } from '@/lib/firebase/admin';
 import { appendToGoogleSheet } from '@/lib/google/sheets';
 
-// Campaign runtime state tracker
-let globalCampaignState: Record<string, any> = {
-  mixer_grinder_stock: 1,
-  bluetooth_speaker_stock: 1,
-  bbq_lunch_awarded_count: 0,
-  last_award_date: '',
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
+const INVENTORY_PATH = 'spinConfig/prizeInventory';
+const TIME_ZONE = 'Asia/Kolkata';
+
+type Prize = {
+  id: string;
+  name: string;
+  category: string;
+  image: string;
 };
 
-function getKolkataDateInfo() {
-  const formatter = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'Asia/Kolkata',
+type PrizeConfig = {
+  key: string;
+  prize: Prize;
+  dailyMax: number;
+  totalMax: number;
+};
+
+type Inventory = {
+  totalCounts?: Record<string, number>;
+  dailyCounts?: Record<string, Record<string, number>>;
+};
+
+type SheetRecord = {
+  requestId: string;
+  customerName: string;
+  phoneNumber: string;
+  billAmount: number;
+  storeName: string;
+  prizeName: string;
+  timestamp: string;
+};
+
+const standardPrizes: PrizeConfig[] = [
+  {
+    key: 'movieTicket',
+    prize: {
+      id: 'movie_ticket',
+      name: 'Movie Ticket',
+      category: 'standard',
+      image: '/images/prizes/movie-ticket.webp',
+    },
+    dailyMax: 18,
+    totalMax: 300,
+  },
+  {
+    key: 'gamingPoints',
+    prize: {
+      id: 'gaming_points',
+      name: 'Gaming Points',
+      category: 'standard',
+      image: '/images/prizes/gaming-points.webp',
+    },
+    dailyMax: 30,
+    totalMax: 480,
+  },
+  {
+    key: 'iceCream',
+    prize: {
+      id: 'ice_cream',
+      name: 'Ice Cream',
+      category: 'standard',
+      image: '/images/prizes/ice-cream.webp',
+    },
+    dailyMax: 12,
+    totalMax: 200,
+  },
+  {
+    key: 'carWash',
+    prize: {
+      id: 'car_wash',
+      name: 'Car Wash Voucher',
+      category: 'standard',
+      image: '/images/prizes/car-wash.webp',
+    },
+    dailyMax: 6,
+    totalMax: 100,
+  },
+  {
+    key: 'pizza',
+    prize: {
+      id: 'pizza_discount',
+      name: 'Pizza',
+      category: 'standard',
+      image: '/images/prizes/pizza.webp',
+    },
+    dailyMax: 10,
+    totalMax: 160,
+  },
+];
+
+const bbqPrize: Prize = {
+  id: 'bbq_lunch',
+  name: 'Barbeque Nation Lunch',
+  category: 'special',
+  image: '/images/prizes/bbq-lunch.webp',
+};
+
+const mixerPrize: Prize = {
+  id: 'mixer_grinder',
+  name: 'Mixer Grinder',
+  category: 'bumper',
+  image: '/images/prizes/mixer-grinder.webp',
+};
+
+const customGift: Prize = {
+  id: 'gift_box',
+  name: 'Custom Gift',
+  category: 'fallback',
+  image: '/images/prizes/gift-box.webp',
+};
+
+function getIndiaDate(date = new Date()): string {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: TIME_ZONE,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
-    weekday: 'short',
-    hour12: false,
-  });
-  
-  const parts = formatter.formatToParts(new Date());
-  const dateMap: Record<string, string> = {};
-  parts.forEach(({ type, value }) => {
-    dateMap[type] = value;
-  });
+  }).formatToParts(date);
 
-  const dateString = `${dateMap['year']}-${dateMap['month']}-${dateMap['day']}`;
-  const weekdayMap: Record<string, number> = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 0 };
-  const weekdayNumber = weekdayMap[dateMap['weekday']] ?? 1;
+  const part = (type: string) =>
+    parts.find((item) => item.type === type)?.value ?? '';
 
-  return { dateString, weekdayNumber };
+  return `${part('year')}-${part('month')}-${part('day')}`;
 }
 
+function chooseRandom<T>(items: T[]): T {
+  return items[randomInt(items.length)];
+}
+
+function getCount(
+  counts: Record<string, number> | undefined,
+  key: string
+): number {
+  const value = counts?.[key];
+
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : 0;
+}
+
+function isStandardAvailable(
+  config: PrizeConfig,
+  dailyCounts: Record<string, number>,
+  totalCounts: Record<string, number>
+): boolean {
+  return (
+    getCount(dailyCounts, config.key) < config.dailyMax &&
+    getCount(totalCounts, config.key) < config.totalMax
+  );
+}
+
+function getLegacyPrizeId(name: string): string {
+  const ids: Record<string, string> = {
+    'Movie Ticket': 'movie_ticket',
+    'Gaming Points': 'gaming_points',
+    'Ice Cream': 'ice_cream',
+    'Ice Cream Buy 1 Get 1': 'ice_cream',
+    'Car Wash Voucher': 'car_wash',
+    'Car Wash Discount': 'car_wash',
+    Pizza: 'pizza_discount',
+    'Pizza 30% Off': 'pizza_discount',
+    'Barbeque Nation Lunch': 'bbq_lunch',
+    'Mixer Grinder': 'mixer_grinder',
+    'Custom Gift': 'gift_box',
+    'Custom Gift Box': 'gift_box',
+  };
+
+  return ids[name] ?? 'gift_box';
+}
+
+function getSavedTimestamp(value: unknown): string {
+  if (
+    value &&
+    typeof value === 'object' &&
+    'toDate' in value &&
+    typeof value.toDate === 'function'
+  ) {
+    return (value.toDate() as Date).toISOString();
+  }
+
+  if (typeof value === 'string' && value) {
+    return value;
+  }
+
+  return new Date().toISOString();
+}
+
+function makeSheetRecord(
+  record: Record<string, unknown>,
+  requestId: string
+): SheetRecord {
+  return {
+    requestId,
+    customerName: String(record.customerName ?? ''),
+    phoneNumber: String(record.phoneNumber ?? ''),
+    billAmount: Number(record.billAmount ?? 0),
+    storeName: String(record.storeName ?? 'General'),
+    prizeName: String(
+      record.wonPrize ??
+        (record.prize as Partial<Prize> | undefined)?.name ??
+        'Custom Gift'
+    ),
+    timestamp: getSavedTimestamp(record.timestamp),
+  };
+}
+
+/**
+ * GET /api/spin
+ * Returns current prize availability.
+ */
 export async function GET() {
-  const { dateString, weekdayNumber } = getKolkataDateInfo();
-  
-  if (globalCampaignState['last_award_date'] !== dateString) {
-    globalCampaignState['bbq_lunch_awarded_count'] = 0;
-    globalCampaignState['last_award_date'] = dateString;
+  try {
+    const snapshot = await adminDb.doc(INVENTORY_PATH).get();
+
+    if (!snapshot.exists) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Prize inventory has not been initialized.',
+        },
+        { status: 503 }
+      );
+    }
+
+    const inventory = snapshot.data() as Inventory;
+    const today = getIndiaDate();
+    const totalCounts = inventory.totalCounts ?? {};
+    const dailyCounts = inventory.dailyCounts?.[today] ?? {};
+
+    const statuses = [
+      ...standardPrizes.map((config) => ({
+        id: config.prize.id,
+        isAvailable: isStandardAvailable(
+          config,
+          dailyCounts,
+          totalCounts
+        ),
+      })),
+      {
+        id: bbqPrize.id,
+        isAvailable:
+          getCount(dailyCounts, 'bbq') < 2 &&
+          getCount(totalCounts, 'bbq') < 30,
+      },
+      {
+        id: mixerPrize.id,
+        isAvailable: getCount(totalCounts, 'mixer') < 1,
+      },
+      {
+        id: customGift.id,
+        isAvailable: true,
+      },
+    ];
+
+    return NextResponse.json({ success: true, statuses });
+  } catch (error) {
+    console.error('Get Prize Availability Error:', error);
+
+    return NextResponse.json(
+      {
+        success: false,
+        error: 'Unable to check prize availability.',
+      },
+      { status: 500 }
+    );
   }
-
-  const mixerGrinderStock = globalCampaignState['mixer_grinder_stock'] ?? 1;
-  const mixerGrinderAwardTimestamp = globalCampaignState['mixer_grinder_award_timestamp'];
-
-  let activateBluetoothSpeaker = false;
-  if (mixerGrinderStock <= 0 && mixerGrinderAwardTimestamp) {
-    const diffDays = (new Date().getTime() - new Date(mixerGrinderAwardTimestamp).getTime()) / (1000 * 3600 * 24);
-    if (diffDays >= 3) activateBluetoothSpeaker = true;
-  }
-
-  const isWeekend = weekdayNumber === 6 || weekdayNumber === 0;
-  const bbqAwardedToday = globalCampaignState['bbq_lunch_awarded_count'] ?? 0;
-
-  const statuses = PRIZES.map((prize) => {
-    let isAvailable = true;
-    if (prize.id === 'mixer_grinder' && mixerGrinderStock <= 0) isAvailable = false;
-    if (prize.id === 'bluetooth_speaker' && (!activateBluetoothSpeaker || (globalCampaignState['bluetooth_speaker_stock'] ?? 1) <= 0)) isAvailable = false;
-    if (prize.id === 'bbq_lunch' && (isWeekend || bbqAwardedToday >= 2)) isAvailable = false;
-    
-    return {
-      id: prize.id,
-      isAvailable,
-    };
-  });
-
-  return NextResponse.json({ statuses });
 }
 
-export async function POST(request: Request) {
+/**
+ * POST /api/spin
+ *
+ * Firebase remains the source of truth.
+ * Google Sheets is synced after the Firestore transaction commits.
+ *
+ * Repeating a request ID never awards a second prize.
+ */
+export async function POST(req: Request) {
   try {
-    console.log('ENV CHECK -> Sheet ID loaded:', process.env.GOOGLE_SHEET_ID ? 'YES' : 'NO');
-    console.log('ENV CHECK -> Client Email loaded:', process.env.GOOGLE_SHEETS_CLIENT_EMAIL ? 'YES' : 'NO');
+    const body = await req.json();
 
-    const body = await request.json();
-    const { verifiedAmount, brandName, customerName, mobileNumber } = body;
+    const customerName =
+      typeof body.customerName === 'string'
+        ? body.customerName.trim()
+        : '';
 
-    const billAmount = Number(verifiedAmount || 5000);
-    const brandId = (brandName || 'general').toLowerCase().trim().replace(/\s+/g, '_');
-    const { dateString, weekdayNumber } = getKolkataDateInfo();
-    const isWeekend = weekdayNumber === 6 || weekdayNumber === 0;
+    const phoneNumber =
+      typeof body.phoneNumber === 'string'
+        ? body.phoneNumber.trim()
+        : '';
 
-    if (globalCampaignState['last_award_date'] !== dateString) {
-      globalCampaignState['bbq_lunch_awarded_count'] = 0;
-      globalCampaignState['last_award_date'] = dateString;
+    const storeName =
+      typeof body.storeName === 'string' && body.storeName.trim()
+        ? body.storeName.trim()
+        : 'General';
+
+    const bill = Number(body.billAmount);
+
+    if (!/^\d{10}$/.test(phoneNumber)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Enter a valid 10-digit phone number.',
+        },
+        { status: 400 }
+      );
     }
 
-    const mixerGrinderStock = globalCampaignState['mixer_grinder_stock'] ?? 1;
-    const mixerGrinderAwardTimestamp = globalCampaignState['mixer_grinder_award_timestamp'];
-    let activateBluetoothSpeaker = false;
-
-    if (mixerGrinderStock <= 0 && mixerGrinderAwardTimestamp) {
-      const diffDays = (new Date().getTime() - new Date(mixerGrinderAwardTimestamp).getTime()) / (1000 * 3600 * 24);
-      if (diffDays >= 3) activateBluetoothSpeaker = true;
+    if (!Number.isFinite(bill) || bill < 3999) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'A minimum bill amount of ₹3,999 is required.',
+        },
+        { status: 400 }
+      );
     }
 
-    const bbqAwardedToday = globalCampaignState['bbq_lunch_awarded_count'] ?? 0;
-    const bbqAvailable = !isWeekend && bbqAwardedToday < 2 && (!PRIZES.find(p => p.id === 'bbq_lunch')?.excludedBrands?.includes(brandId));
+    if (!customerName) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Customer name is required.',
+        },
+        { status: 400 }
+      );
+    }
 
-    let eligiblePrizes = [];
+    const requestId =
+      typeof body.requestId === 'string' &&
+      /^[a-zA-Z0-9_-]{8,100}$/.test(body.requestId)
+        ? body.requestId
+        : '';
 
-    if (billAmount > 50000) {
-      eligiblePrizes = PRIZES.filter(p => {
-        if (p.id === 'mixer_grinder') return mixerGrinderStock > 0;
-        if (p.id === 'bluetooth_speaker') return activateBluetoothSpeaker && (globalCampaignState['bluetooth_speaker_stock'] ?? 1) > 0;
-        return false;
+    if (!requestId) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            'Missing requestId. Reuse the same ID when retrying a spin.',
+        },
+        { status: 400 }
+      );
+    }
+
+    const spinRef = adminDb.collection('spins').doc(requestId);
+    const inventoryRef = adminDb.doc(INVENTORY_PATH);
+
+    const now = new Date();
+    const today = getIndiaDate(now);
+
+    const result = await adminDb.runTransaction(async (tx) => {
+      const existingSpin = await tx.get(spinRef);
+
+      if (existingSpin.exists) {
+        const existing = existingSpin.data()!;
+        const savedPrize = existing.prize as Partial<Prize> | undefined;
+        const savedName =
+          savedPrize?.name ?? existing.wonPrize ?? 'Custom Gift';
+
+        const prize: Prize = {
+          id: savedPrize?.id ?? getLegacyPrizeId(savedName),
+          name: savedName,
+          category: savedPrize?.category ?? 'fallback',
+          image: savedPrize?.image ?? '/images/prizes/gift-box.webp',
+        };
+
+        return {
+          prize,
+          repeated: true,
+          sheetRecord: makeSheetRecord(existing, requestId),
+        };
+      }
+
+      const inventorySnapshot = await tx.get(inventoryRef);
+
+      if (!inventorySnapshot.exists) {
+        throw new Error('INVENTORY_NOT_INITIALIZED');
+      }
+
+      const inventory = inventorySnapshot.data() as Inventory;
+      const totalCounts = inventory.totalCounts ?? {};
+      const dailyCounts = inventory.dailyCounts?.[today] ?? {};
+
+      let assignedPrize: Prize;
+      let claimedKey: string | null = null;
+
+      if (bill >= 50000) {
+        if (getCount(totalCounts, 'mixer') < 1) {
+          assignedPrize = mixerPrize;
+          claimedKey = 'mixer';
+        } else {
+          assignedPrize = customGift;
+        }
+      } else if (bill >= 8000) {
+        if (
+          getCount(dailyCounts, 'bbq') < 2 &&
+          getCount(totalCounts, 'bbq') < 30
+        ) {
+          assignedPrize = bbqPrize;
+          claimedKey = 'bbq';
+        } else {
+          assignedPrize = customGift;
+        }
+      } else {
+        const availableStandard = standardPrizes.filter((config) =>
+          isStandardAvailable(config, dailyCounts, totalCounts)
+        );
+
+        if (availableStandard.length === 0) {
+          throw new Error('NO_PRIZES_AVAILABLE');
+        }
+
+        const selected = chooseRandom(availableStandard);
+        assignedPrize = selected.prize;
+        claimedKey = selected.key;
+      }
+
+      const newTotalCounts = { ...totalCounts };
+      const newDailyCounts = { ...dailyCounts };
+
+      if (claimedKey) {
+        newTotalCounts[claimedKey] =
+          getCount(totalCounts, claimedKey) + 1;
+
+        newDailyCounts[claimedKey] =
+          getCount(dailyCounts, claimedKey) + 1;
+      }
+
+      const sheetRecord: SheetRecord = {
+        requestId,
+        customerName,
+        phoneNumber,
+        billAmount: bill,
+        storeName,
+        prizeName: assignedPrize.name,
+        timestamp: now.toISOString(),
+      };
+
+      tx.set(
+        inventoryRef,
+        {
+          totalCounts: newTotalCounts,
+          dailyCounts: {
+            ...(inventory.dailyCounts ?? {}),
+            [today]: newDailyCounts,
+          },
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      tx.create(spinRef, {
+        customerName,
+        phoneNumber,
+        storeName,
+        billAmount: bill,
+        prize: assignedPrize,
+        wonPrize: assignedPrize.name,
+        timestamp: FieldValue.serverTimestamp(),
+        spinDate: today,
+        requestId,
+        googleSheetsSyncStatus: 'pending',
       });
-    } else if (billAmount > 8000) {
-      eligiblePrizes = PRIZES.filter(p => {
-        if (p.tier === 'mega') return false;
-        if (p.id === 'bbq_lunch' && !bbqAvailable) return false;
-        if (p.excludedBrands && p.excludedBrands.includes(brandId)) return false;
-        return true;
-      });
-    } else {
-      eligiblePrizes = PRIZES.filter(p => {
-        if (p.tier !== 'general') return false;
-        if (p.excludedBrands && p.excludedBrands.includes(brandId)) return false;
-        return true;
-      });
-    }
 
-    if (eligiblePrizes.length === 0) {
-      eligiblePrizes = PRIZES.filter(p => p.tier === 'general' && (!p.excludedBrands || !p.excludedBrands.includes(brandId)));
-    }
+      return {
+        prize: assignedPrize,
+        repeated: false,
+        sheetRecord,
+      };
+    });
 
-    const randomIndex = Math.floor(Math.random() * eligiblePrizes.length);
-    const wonPrize = eligiblePrizes[randomIndex];
+    // IMPORTANT: this happens only after the Firestore transaction commits.
+    // Repeated requests retry syncing the original saved spin.
+    let sheetSynced = false;
 
-    if (wonPrize.id === 'mixer_grinder') {
-      globalCampaignState['mixer_grinder_stock'] = 0;
-      globalCampaignState['mixer_grinder_award_timestamp'] = new Date().toISOString();
-    } else if (wonPrize.id === 'bluetooth_speaker') {
-      globalCampaignState['bluetooth_speaker_stock'] = 0;
-    } else if (wonPrize.id === 'bbq_lunch') {
-      globalCampaignState['bbq_lunch_awarded_count'] = bbqAwardedToday + 1;
-    }
-
-    // --- SYNC TO GOOGLE SHEETS ---
-    const timestampStr = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
     try {
-      await appendToGoogleSheet({
-        customerName: customerName || 'Participant',
-        phoneNumber: mobileNumber || 'N/A',
-        billAmount,
-        storeName: brandName || 'General',
-        prizeName: wonPrize.name,
-        timestamp: timestampStr,
-      });
-      console.log('Successfully synced participant record to Google Sheet!');
-    } catch (sheetErr) {
-      console.error('Google Sheet sync error:', sheetErr);
+      await appendToGoogleSheet(result.sheetRecord);
+
+      await spinRef.set(
+        {
+          googleSheetsSyncStatus: 'synced',
+          googleSheetsSyncedAt: FieldValue.serverTimestamp(),
+          googleSheetsSyncError: FieldValue.delete(),
+        },
+        { merge: true }
+      );
+
+      sheetSynced = true;
+    } catch (sheetError) {
+      // Do not undo a successful spin if Google Sheets is unavailable.
+      console.error('Google Sheets sync failed:', sheetError);
+
+      try {
+        await spinRef.set(
+          {
+            googleSheetsSyncStatus: 'pending',
+            googleSheetsLastSyncAttemptAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+      } catch (statusError) {
+        console.error('Unable to update Sheets sync status:', statusError);
+      }
     }
 
     return NextResponse.json({
       success: true,
-      prize: wonPrize,
-      duplicate: false,
+      prize: result.prize,
+      repeated: result.repeated,
+      sheetSynced,
+      sheetSyncStatus: sheetSynced ? 'synced' : 'pending',
     });
+  } catch (error) {
+    console.error('Spin API Error:', error);
 
-  } catch (error: any) {
-    console.error('Spin API error:', error);
-    return NextResponse.json({
-      success: true,
-      prize: PRIZES[0],
-      duplicate: false,
-    });
+    if (
+      error instanceof Error &&
+      error.message === 'NO_PRIZES_AVAILABLE'
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            'No standard prizes are currently available. Please contact mall staff.',
+        },
+        { status: 409 }
+      );
+    }
+
+    if (
+      error instanceof Error &&
+      error.message === 'INVENTORY_NOT_INITIALIZED'
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            'Prize inventory has not been initialized. Please contact the administrator.',
+        },
+        { status: 503 }
+      );
+    }
+
+    return NextResponse.json(
+      {
+        success: false,
+        error: 'Unable to process the spin.',
+      },
+      { status: 500 }
+    );
   }
 }

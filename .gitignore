@@ -52,3 +52,11 @@ typescript
 
 *.tsbuildinfo
 next-env.d.ts
+
+.env
+.env.*
+!.env.example
+
+service-account.json
+service-account.json.json
+firebase-new-key.json
