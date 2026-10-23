@@ -6,6 +6,8 @@ import { Search, Users, Award, LogOut, Loader2, Store, Phone } from 'lucide-reac
 import { collection, getDocs, query, orderBy } from 'firebase/firestore';
 import { db } from '@/lib/firebase/client';
 
+export const dynamic = 'force-dynamic';
+
 interface Participant {
   id: string;
   customerName: string;
