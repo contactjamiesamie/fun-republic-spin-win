@@ -11,6 +11,9 @@ export const dynamic = 'force-dynamic';
 const INVENTORY_PATH = 'spinConfig/prizeInventory';
 const TIME_ZONE = 'Asia/Kolkata';
 
+// Carry-forward starts on this date in India.
+const CARRY_FORWARD_START_DATE = '2026-10-26';
+
 type Prize = {
   id: string;
   name: string;
@@ -148,13 +151,63 @@ function getCount(
     : 0;
 }
 
+/**
+ * Adds calendar days using UTC to avoid server timezone differences.
+ */
+function addDays(dateString: string, days: number): string {
+  const date = new Date(`${dateString}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+/**
+ * Calculates the daily quota for a standard prize.
+ *
+ * Carry-forward begins on October 26, 2026.
+ * Dates before the start date are not used to calculate
+ * any carry-forward balance.
+ *
+ * For each day from the start date:
+ * effective quota = regular quota + previous unused quota
+ * unused quota = max(0, effective quota - prizes awarded)
+ *
+ * Missing dailyCounts dates are treated as zero awards.
+ * This function only reads existing counts; it does not
+ * reset or rewrite historical inventory data.
+ */
+function getEffectiveDailyMax(
+  key: string,
+  baseDailyMax: number,
+  dailyCountsByDate: Record<string, Record<string, number>>,
+  targetDate: string
+): number {
+  // Before and on the start date, use the normal quota.
+  if (targetDate <= CARRY_FORWARD_START_DATE) {
+    return baseDailyMax;
+  }
+
+  let carryForward = 0;
+  let currentDate = CARRY_FORWARD_START_DATE;
+
+  while (currentDate < targetDate) {
+    const effectiveQuota = baseDailyMax + carryForward;
+    const used = getCount(dailyCountsByDate[currentDate], key);
+
+    carryForward = Math.max(0, effectiveQuota - used);
+    currentDate = addDays(currentDate, 1);
+  }
+
+  return baseDailyMax + carryForward;
+}
+
 function isStandardAvailable(
   config: PrizeConfig,
   dailyCounts: Record<string, number>,
-  totalCounts: Record<string, number>
+  totalCounts: Record<string, number>,
+  effectiveDailyMax = config.dailyMax
 ): boolean {
   return (
-    getCount(dailyCounts, config.key) < config.dailyMax &&
+    getCount(dailyCounts, config.key) < effectiveDailyMax &&
     getCount(totalCounts, config.key) < config.totalMax
   );
 }
@@ -235,17 +288,28 @@ export async function GET() {
     const inventory = snapshot.data() as Inventory;
     const today = getIndiaDate();
     const totalCounts = inventory.totalCounts ?? {};
-    const dailyCounts = inventory.dailyCounts?.[today] ?? {};
+    const allDailyCounts = inventory.dailyCounts ?? {};
+    const dailyCounts = allDailyCounts[today] ?? {};
 
     const statuses = [
-      ...standardPrizes.map((config) => ({
-        id: config.prize.id,
-        isAvailable: isStandardAvailable(
-          config,
-          dailyCounts,
-          totalCounts
-        ),
-      })),
+      ...standardPrizes.map((config) => {
+        const effectiveDailyMax = getEffectiveDailyMax(
+          config.key,
+          config.dailyMax,
+          allDailyCounts,
+          today
+        );
+
+        return {
+          id: config.prize.id,
+          isAvailable: isStandardAvailable(
+            config,
+            dailyCounts,
+            totalCounts,
+            effectiveDailyMax
+          ),
+        };
+      }),
       {
         id: bbqPrize.id,
         isAvailable:
@@ -389,7 +453,8 @@ export async function POST(req: Request) {
 
       const inventory = inventorySnapshot.data() as Inventory;
       const totalCounts = inventory.totalCounts ?? {};
-      const dailyCounts = inventory.dailyCounts?.[today] ?? {};
+      const allDailyCounts = inventory.dailyCounts ?? {};
+      const dailyCounts = allDailyCounts[today] ?? {};
 
       let assignedPrize: Prize;
       let claimedKey: string | null = null;
@@ -412,9 +477,21 @@ export async function POST(req: Request) {
           assignedPrize = customGift;
         }
       } else {
-        const availableStandard = standardPrizes.filter((config) =>
-          isStandardAvailable(config, dailyCounts, totalCounts)
-        );
+        const availableStandard = standardPrizes.filter((config) => {
+          const effectiveDailyMax = getEffectiveDailyMax(
+            config.key,
+            config.dailyMax,
+            allDailyCounts,
+            today
+          );
+
+          return isStandardAvailable(
+            config,
+            dailyCounts,
+            totalCounts,
+            effectiveDailyMax
+          );
+        });
 
         if (availableStandard.length === 0) {
           throw new Error('NO_PRIZES_AVAILABLE');
@@ -451,7 +528,7 @@ export async function POST(req: Request) {
         {
           totalCounts: newTotalCounts,
           dailyCounts: {
-            ...(inventory.dailyCounts ?? {}),
+            ...allDailyCounts,
             [today]: newDailyCounts,
           },
           updatedAt: FieldValue.serverTimestamp(),
@@ -479,7 +556,7 @@ export async function POST(req: Request) {
       };
     });
 
-    // IMPORTANT: this happens only after the Firestore transaction commits.
+    // Sync Google Sheets only after the Firestore transaction commits.
     // Repeated requests retry syncing the original saved spin.
     let sheetSynced = false;
 
