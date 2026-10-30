@@ -115,7 +115,7 @@ async function auditSpins() {
       reasons.push('phone missing or invalid');
     }
 
-    if (!Number.isFinite(bill) || bill < 3999) {
+    if (!Number.isFinite(bill) || bill <= 0) {
       reasons.push('bill below ₹3,999 or missing');
     }
 

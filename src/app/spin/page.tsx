@@ -159,7 +159,7 @@ export default function SpinPage() {
         );
       }
 
-      if (!Number.isFinite(billAmount) || billAmount < 3999) {
+      if (!Number.isFinite(billAmount) || billAmount <= 0) {
         throw new Error(
           'A minimum bill amount of ₹3,999 is required.'
         );

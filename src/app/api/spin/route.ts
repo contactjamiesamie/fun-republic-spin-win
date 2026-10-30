@@ -8,11 +8,13 @@ import { appendToGoogleSheet } from '@/lib/google/sheets';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const INVENTORY_PATH = 'spinConfig/prizeInventory';
 const TIME_ZONE = 'Asia/Kolkata';
+const CAMPAIGN_START = '2026-10-31';
+const CAMPAIGN_END = '2026-11-07';
 
-// Carry-forward starts on this date in India.
-const CARRY_FORWARD_START_DATE = '2026-10-26';
+// Separate document: existing inventory and historical counters are untouched.
+const CAMPAIGN_INVENTORY_PATH =
+  'spinConfig/funRepublicCampaign20261031';
 
 type Prize = {
   id: string;
@@ -24,11 +26,10 @@ type Prize = {
 type PrizeConfig = {
   key: string;
   prize: Prize;
-  dailyMax: number;
-  totalMax: number;
+  totalStock: number;
 };
 
-type Inventory = {
+type CampaignInventory = {
   totalCounts?: Record<string, number>;
   dailyCounts?: Record<string, Record<string, number>>;
 };
@@ -43,84 +44,68 @@ type SheetRecord = {
   timestamp: string;
 };
 
-const standardPrizes: PrizeConfig[] = [
+const prizes: PrizeConfig[] = [
   {
     key: 'movieTicket',
+    totalStock: 242,
     prize: {
       id: 'movie_ticket',
       name: 'Movie Ticket',
       category: 'standard',
       image: '/images/prizes/movie-ticket.webp',
     },
-    dailyMax: 18,
-    totalMax: 300,
+  },
+  {
+    key: 'bbq',
+    totalStock: 20,
+    prize: {
+      id: 'bbq_lunch',
+      name: 'Barbeque Nation Lunch',
+      category: 'special',
+      image: '/images/prizes/bbq-lunch.webp',
+    },
   },
   {
     key: 'gamingPoints',
+    totalStock: 426,
     prize: {
       id: 'gaming_points',
-      name: 'Gaming Points',
+      name: '250 Gaming Points',
       category: 'standard',
       image: '/images/prizes/gaming-points.webp',
     },
-    dailyMax: 30,
-    totalMax: 480,
-  },
-  {
-    key: 'iceCream',
-    prize: {
-      id: 'ice_cream',
-      name: 'Ice Cream',
-      category: 'standard',
-      image: '/images/prizes/ice-cream.webp',
-    },
-    dailyMax: 12,
-    totalMax: 200,
-  },
-  {
-    key: 'carWash',
-    prize: {
-      id: 'car_wash',
-      name: 'Car Wash Voucher',
-      category: 'standard',
-      image: '/images/prizes/car-wash.webp',
-    },
-    dailyMax: 6,
-    totalMax: 100,
   },
   {
     key: 'pizza',
+    totalStock: 130,
     prize: {
       id: 'pizza_discount',
       name: 'Pizza',
       category: 'standard',
       image: '/images/prizes/pizza.webp',
     },
-    dailyMax: 10,
-    totalMax: 160,
+  },
+  {
+    key: 'carWash',
+    totalStock: 83,
+    prize: {
+      id: 'car_wash',
+      name: 'Car Wash Voucher',
+      category: 'standard',
+      image: '/images/prizes/car-wash.webp',
+    },
+  },
+  {
+    key: 'iceCream',
+    totalStock: 135,
+    prize: {
+      id: 'ice_cream',
+      name: 'Ice Cream',
+      category: 'standard',
+      image: '/images/prizes/ice-cream.webp',
+    },
   },
 ];
-
-const bbqPrize: Prize = {
-  id: 'bbq_lunch',
-  name: 'Barbeque Nation Lunch',
-  category: 'special',
-  image: '/images/prizes/bbq-lunch.webp',
-};
-
-const mixerPrize: Prize = {
-  id: 'mixer_grinder',
-  name: 'Mixer Grinder',
-  category: 'bumper',
-  image: '/images/prizes/mixer-grinder.webp',
-};
-
-const customGift: Prize = {
-  id: 'gift_box',
-  name: 'Custom Gift',
-  category: 'fallback',
-  image: '/images/prizes/gift-box.webp',
-};
 
 function getIndiaDate(date = new Date()): string {
   const parts = new Intl.DateTimeFormat('en-GB', {
@@ -136,8 +121,10 @@ function getIndiaDate(date = new Date()): string {
   return `${part('year')}-${part('month')}-${part('day')}`;
 }
 
-function chooseRandom<T>(items: T[]): T {
-  return items[randomInt(items.length)];
+function addDays(dateString: string, days: number): string {
+  const date = new Date(`${dateString}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
 }
 
 function getCount(
@@ -145,87 +132,131 @@ function getCount(
   key: string
 ): number {
   const value = counts?.[key];
-
   return typeof value === 'number' && Number.isFinite(value)
-    ? value
+    ? Math.max(0, value)
     : 0;
 }
 
-/**
- * Adds calendar days using UTC to avoid server timezone differences.
- */
-function addDays(dateString: string, days: number): string {
-  const date = new Date(`${dateString}T00:00:00.000Z`);
-  date.setUTCDate(date.getUTCDate() + days);
-  return date.toISOString().slice(0, 10);
+function isCampaignDate(date: string): boolean {
+  return date >= CAMPAIGN_START && date <= CAMPAIGN_END;
 }
 
 /**
- * Calculates the daily quota for a standard prize.
+ * Divides the total stock across 8 days.
+ * Any remainder is allocated one at a time to the earliest days.
  *
- * Carry-forward begins on October 26, 2026.
- * Dates before the start date are not used to calculate
- * any carry-forward balance.
- *
- * For each day from the start date:
- * effective quota = regular quota + previous unused quota
- * unused quota = max(0, effective quota - prizes awarded)
- *
- * Missing dailyCounts dates are treated as zero awards.
- * This function only reads existing counts; it does not
- * reset or rewrite historical inventory data.
+ * Example: 242 / 8 = 30 remainder 2
+ * Days 1 and 2 get 31; days 3–8 get 30.
  */
-function getEffectiveDailyMax(
-  key: string,
-  baseDailyMax: number,
-  dailyCountsByDate: Record<string, Record<string, number>>,
-  targetDate: string
+function getBaseDailyQuota(totalStock: number, dayIndex: number): number {
+  const days = 8;
+  const base = Math.floor(totalStock / days);
+  const remainder = totalStock % days;
+
+  return base + (dayIndex < remainder ? 1 : 0);
+}
+
+/**
+ * Calculates today's quota, including all unused quota carried
+ * forward from previous campaign days.
+ */
+function getEffectiveDailyQuota(
+  prize: PrizeConfig,
+  targetDate: string,
+  dailyCounts: Record<string, Record<string, number>>
 ): number {
-  // Before and on the start date, use the normal quota.
-  if (targetDate <= CARRY_FORWARD_START_DATE) {
-    return baseDailyMax;
-  }
-
   let carryForward = 0;
-  let currentDate = CARRY_FORWARD_START_DATE;
+  let currentDate = CAMPAIGN_START;
+  let dayIndex = 0;
 
-  while (currentDate < targetDate) {
-    const effectiveQuota = baseDailyMax + carryForward;
-    const used = getCount(dailyCountsByDate[currentDate], key);
+  while (currentDate <= targetDate) {
+    const baseQuota = getBaseDailyQuota(prize.totalStock, dayIndex);
+    const effectiveQuota = baseQuota + carryForward;
+    const awarded = getCount(dailyCounts[currentDate], prize.key);
 
-    carryForward = Math.max(0, effectiveQuota - used);
+    if (currentDate === targetDate) {
+      return Math.max(0, effectiveQuota);
+    }
+
+    carryForward = Math.max(0, effectiveQuota - awarded);
     currentDate = addDays(currentDate, 1);
+    dayIndex++;
   }
 
-  return baseDailyMax + carryForward;
+  return 0;
 }
 
-function isStandardAvailable(
-  config: PrizeConfig,
-  dailyCounts: Record<string, number>,
-  totalCounts: Record<string, number>,
-  effectiveDailyMax = config.dailyMax
-): boolean {
-  return (
-    getCount(dailyCounts, config.key) < effectiveDailyMax &&
-    getCount(totalCounts, config.key) < config.totalMax
+function getAvailableForToday(
+  prize: PrizeConfig,
+  today: string,
+  inventory: CampaignInventory
+): number {
+  if (!isCampaignDate(today)) return 0;
+
+  const allDailyCounts = inventory.dailyCounts ?? {};
+  const todayCounts = allDailyCounts[today] ?? {};
+  const totalCounts = inventory.totalCounts ?? {};
+
+  const dailyQuota = getEffectiveDailyQuota(
+    prize,
+    today,
+    allDailyCounts
   );
+
+  const dailyRemaining = Math.max(
+    0,
+    dailyQuota - getCount(todayCounts, prize.key)
+  );
+
+  const totalRemaining = Math.max(
+    0,
+    prize.totalStock - getCount(totalCounts, prize.key)
+  );
+
+  return Math.min(dailyRemaining, totalRemaining);
+}
+
+/**
+ * Randomly selects one remaining prize unit.
+ * A prize with 20 remaining units has twice the selection weight
+ * of a prize with 10 remaining units.
+ */
+function chooseWeightedPrize(
+  availablePrizes: Array<{ config: PrizeConfig; remaining: number }>
+): PrizeConfig {
+  const totalWeight = availablePrizes.reduce(
+    (sum, item) => sum + item.remaining,
+    0
+  );
+
+  if (totalWeight <= 0) {
+    throw new Error('NO_PRIZES_AVAILABLE');
+  }
+
+  let selectedNumber = randomInt(totalWeight);
+
+  for (const item of availablePrizes) {
+    if (selectedNumber < item.remaining) {
+      return item.config;
+    }
+
+    selectedNumber -= item.remaining;
+  }
+
+  throw new Error('NO_PRIZES_AVAILABLE');
 }
 
 function getLegacyPrizeId(name: string): string {
   const ids: Record<string, string> = {
     'Movie Ticket': 'movie_ticket',
-    'Gaming Points': 'gaming_points',
-    'Ice Cream': 'ice_cream',
-    'Ice Cream Buy 1 Get 1': 'ice_cream',
-    'Car Wash Voucher': 'car_wash',
-    'Car Wash Discount': 'car_wash',
-    Pizza: 'pizza_discount',
-    'Pizza 30% Off': 'pizza_discount',
     'Barbeque Nation Lunch': 'bbq_lunch',
+    '250 Gaming Points': 'gaming_points',
+    'Gaming Points': 'gaming_points',
+    Pizza: 'pizza_discount',
+    'Car Wash Voucher': 'car_wash',
+    'Ice Cream': 'ice_cream',
     'Mixer Grinder': 'mixer_grinder',
     'Custom Gift': 'gift_box',
-    'Custom Gift Box': 'gift_box',
   };
 
   return ids[name] ?? 'gift_box';
@@ -252,6 +283,8 @@ function makeSheetRecord(
   record: Record<string, unknown>,
   requestId: string
 ): SheetRecord {
+  const savedPrize = record.prize as Partial<Prize> | undefined;
+
   return {
     requestId,
     customerName: String(record.customerName ?? ''),
@@ -259,9 +292,7 @@ function makeSheetRecord(
     billAmount: Number(record.billAmount ?? 0),
     storeName: String(record.storeName ?? 'General'),
     prizeName: String(
-      record.wonPrize ??
-        (record.prize as Partial<Prize> | undefined)?.name ??
-        'Custom Gift'
+      record.wonPrize ?? savedPrize?.name ?? 'Custom Gift'
     ),
     timestamp: getSavedTimestamp(record.timestamp),
   };
@@ -269,64 +300,44 @@ function makeSheetRecord(
 
 /**
  * GET /api/spin
- * Returns current prize availability.
+ * Returns today's availability and remaining daily quantities.
  */
 export async function GET() {
   try {
-    const snapshot = await adminDb.doc(INVENTORY_PATH).get();
-
-    if (!snapshot.exists) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: 'Prize inventory has not been initialized.',
-        },
-        { status: 503 }
-      );
-    }
-
-    const inventory = snapshot.data() as Inventory;
     const today = getIndiaDate();
-    const totalCounts = inventory.totalCounts ?? {};
-    const allDailyCounts = inventory.dailyCounts ?? {};
-    const dailyCounts = allDailyCounts[today] ?? {};
+    const snapshot = await adminDb
+      .doc(CAMPAIGN_INVENTORY_PATH)
+      .get();
 
-    const statuses = [
-      ...standardPrizes.map((config) => {
-        const effectiveDailyMax = getEffectiveDailyMax(
-          config.key,
-          config.dailyMax,
-          allDailyCounts,
-          today
-        );
+    const inventory = snapshot.exists
+      ? (snapshot.data() as CampaignInventory)
+      : {};
 
-        return {
-          id: config.prize.id,
-          isAvailable: isStandardAvailable(
-            config,
-            dailyCounts,
-            totalCounts,
-            effectiveDailyMax
-          ),
-        };
-      }),
-      {
-        id: bbqPrize.id,
-        isAvailable:
-          getCount(dailyCounts, 'bbq') < 2 &&
-          getCount(totalCounts, 'bbq') < 30,
-      },
-      {
-        id: mixerPrize.id,
-        isAvailable: getCount(totalCounts, 'mixer') < 1,
-      },
-      {
-        id: customGift.id,
-        isAvailable: true,
-      },
-    ];
+    const statuses = prizes.map((config) => {
+      const remaining = getAvailableForToday(
+        config,
+        today,
+        inventory
+      );
 
-    return NextResponse.json({ success: true, statuses });
+      return {
+        id: config.prize.id,
+        isAvailable: remaining > 0,
+        remaining,
+        totalStock: config.totalStock,
+      };
+    });
+
+    return NextResponse.json({
+      success: true,
+      campaign: {
+        startDate: CAMPAIGN_START,
+        endDate: CAMPAIGN_END,
+        today,
+        isActive: isCampaignDate(today),
+      },
+      statuses,
+    });
   } catch (error) {
     console.error('Get Prize Availability Error:', error);
 
@@ -343,10 +354,9 @@ export async function GET() {
 /**
  * POST /api/spin
  *
- * Firebase remains the source of truth.
- * Google Sheets is synced after the Firestore transaction commits.
- *
- * Repeating a request ID never awards a second prize.
+ * Firestore is the source of truth.
+ * Prize selection and inventory updates happen atomically.
+ * Google Sheets sync happens only after the transaction commits.
  */
 export async function POST(req: Request) {
   try {
@@ -379,7 +389,7 @@ export async function POST(req: Request) {
       );
     }
 
-    if (!Number.isFinite(bill) || bill < 3999) {
+    if (!Number.isFinite(bill) || bill <= 0) {
       return NextResponse.json(
         {
           success: false,
@@ -417,12 +427,16 @@ export async function POST(req: Request) {
     }
 
     const spinRef = adminDb.collection('spins').doc(requestId);
-    const inventoryRef = adminDb.doc(INVENTORY_PATH);
+    const campaignInventoryRef = adminDb.doc(
+      CAMPAIGN_INVENTORY_PATH
+    );
 
     const now = new Date();
     const today = getIndiaDate(now);
 
     const result = await adminDb.runTransaction(async (tx) => {
+      // Check idempotency first. A retry returns the original result,
+      // even if the campaign date has since ended.
       const existingSpin = await tx.get(spinRef);
 
       if (existingSpin.exists) {
@@ -435,7 +449,8 @@ export async function POST(req: Request) {
           id: savedPrize?.id ?? getLegacyPrizeId(savedName),
           name: savedName,
           category: savedPrize?.category ?? 'fallback',
-          image: savedPrize?.image ?? '/images/prizes/gift-box.webp',
+          image:
+            savedPrize?.image ?? '/images/prizes/gift-box.webp',
         };
 
         return {
@@ -445,73 +460,52 @@ export async function POST(req: Request) {
         };
       }
 
-      const inventorySnapshot = await tx.get(inventoryRef);
-
-      if (!inventorySnapshot.exists) {
-        throw new Error('INVENTORY_NOT_INITIALIZED');
+      if (!isCampaignDate(today)) {
+        throw new Error('CAMPAIGN_NOT_ACTIVE');
       }
 
-      const inventory = inventorySnapshot.data() as Inventory;
+      const inventorySnapshot = await tx.get(
+        campaignInventoryRef
+      );
+
+      const inventory: CampaignInventory =
+        inventorySnapshot.exists
+          ? (inventorySnapshot.data() as CampaignInventory)
+          : {};
+
       const totalCounts = inventory.totalCounts ?? {};
       const allDailyCounts = inventory.dailyCounts ?? {};
-      const dailyCounts = allDailyCounts[today] ?? {};
+      const todayCounts = allDailyCounts[today] ?? {};
 
-      let assignedPrize: Prize;
-      let claimedKey: string | null = null;
-
-      if (bill >= 50000) {
-        if (getCount(totalCounts, 'mixer') < 1) {
-          assignedPrize = mixerPrize;
-          claimedKey = 'mixer';
-        } else {
-          assignedPrize = customGift;
-        }
-      } else if (bill >= 8000) {
-        if (
-          getCount(dailyCounts, 'bbq') < 2 &&
-          getCount(totalCounts, 'bbq') < 30
-        ) {
-          assignedPrize = bbqPrize;
-          claimedKey = 'bbq';
-        } else {
-          assignedPrize = customGift;
-        }
-      } else {
-        const availableStandard = standardPrizes.filter((config) => {
-          const effectiveDailyMax = getEffectiveDailyMax(
-            config.key,
-            config.dailyMax,
-            allDailyCounts,
-            today
-          );
-
-          return isStandardAvailable(
+      const availablePrizes = prizes
+        .map((config) => ({
+          config,
+          remaining: getAvailableForToday(
             config,
-            dailyCounts,
-            totalCounts,
-            effectiveDailyMax
-          );
-        });
+            today,
+            inventory
+          ),
+        }))
+        .filter((item) => item.remaining > 0);
 
-        if (availableStandard.length === 0) {
-          throw new Error('NO_PRIZES_AVAILABLE');
-        }
-
-        const selected = chooseRandom(availableStandard);
-        assignedPrize = selected.prize;
-        claimedKey = selected.key;
+      if (availablePrizes.length === 0) {
+        throw new Error('NO_PRIZES_AVAILABLE');
       }
 
-      const newTotalCounts = { ...totalCounts };
-      const newDailyCounts = { ...dailyCounts };
+      const selected = chooseWeightedPrize(availablePrizes);
+      const assignedPrize = selected.prize;
 
-      if (claimedKey) {
-        newTotalCounts[claimedKey] =
-          getCount(totalCounts, claimedKey) + 1;
+      const newTotalCounts = {
+        ...totalCounts,
+        [selected.key]:
+          getCount(totalCounts, selected.key) + 1,
+      };
 
-        newDailyCounts[claimedKey] =
-          getCount(dailyCounts, claimedKey) + 1;
-      }
+      const newTodayCounts = {
+        ...todayCounts,
+        [selected.key]:
+          getCount(todayCounts, selected.key) + 1,
+      };
 
       const sheetRecord: SheetRecord = {
         requestId,
@@ -523,13 +517,17 @@ export async function POST(req: Request) {
         timestamp: now.toISOString(),
       };
 
+      // This creates the campaign inventory document only if it
+      // does not exist. It never resets the old inventory document.
       tx.set(
-        inventoryRef,
+        campaignInventoryRef,
         {
+          campaignStart: CAMPAIGN_START,
+          campaignEnd: CAMPAIGN_END,
           totalCounts: newTotalCounts,
           dailyCounts: {
             ...allDailyCounts,
-            [today]: newDailyCounts,
+            [today]: newTodayCounts,
           },
           updatedAt: FieldValue.serverTimestamp(),
         },
@@ -546,6 +544,7 @@ export async function POST(req: Request) {
         timestamp: FieldValue.serverTimestamp(),
         spinDate: today,
         requestId,
+        campaignId: 'funRepublicCampaign20261031',
         googleSheetsSyncStatus: 'pending',
       });
 
@@ -556,8 +555,8 @@ export async function POST(req: Request) {
       };
     });
 
-    // Sync Google Sheets only after the Firestore transaction commits.
-    // Repeated requests retry syncing the original saved spin.
+    // Keep Google Sheets sync outside the transaction.
+    // A failed sync does not undo a successful spin.
     let sheetSynced = false;
 
     try {
@@ -574,19 +573,22 @@ export async function POST(req: Request) {
 
       sheetSynced = true;
     } catch (sheetError) {
-      // Do not undo a successful spin if Google Sheets is unavailable.
       console.error('Google Sheets sync failed:', sheetError);
 
       try {
         await spinRef.set(
           {
             googleSheetsSyncStatus: 'pending',
-            googleSheetsLastSyncAttemptAt: FieldValue.serverTimestamp(),
+            googleSheetsLastSyncAttemptAt:
+              FieldValue.serverTimestamp(),
           },
           { merge: true }
         );
       } catch (statusError) {
-        console.error('Unable to update Sheets sync status:', statusError);
+        console.error(
+          'Unable to update Sheets sync status:',
+          statusError
+        );
       }
     }
 
@@ -602,29 +604,29 @@ export async function POST(req: Request) {
 
     if (
       error instanceof Error &&
+      error.message === 'CAMPAIGN_NOT_ACTIVE'
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            'The Spin & Win campaign is active only from October 31 to November 7, 2026.',
+        },
+        { status: 403 }
+      );
+    }
+
+    if (
+      error instanceof Error &&
       error.message === 'NO_PRIZES_AVAILABLE'
     ) {
       return NextResponse.json(
         {
           success: false,
           error:
-            'No standard prizes are currently available. Please contact mall staff.',
+            'No prizes are currently available. Please contact mall staff.',
         },
         { status: 409 }
-      );
-    }
-
-    if (
-      error instanceof Error &&
-      error.message === 'INVENTORY_NOT_INITIALIZED'
-    ) {
-      return NextResponse.json(
-        {
-          success: false,
-          error:
-            'Prize inventory has not been initialized. Please contact the administrator.',
-        },
-        { status: 503 }
       );
     }
 

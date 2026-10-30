@@ -32,7 +32,7 @@ export default function RegisterPage() {
 
     // 2. Bill amount validation (minimum ₹3,999)
     const numericBill = Number(formData.billAmount);
-    if (isNaN(numericBill) || numericBill < 3999) {
+    if (isNaN(numericBill) || numericBill <= 0) {
       setError('Not eligible for the bill amount. Minimum bill must be ₹3,999.');
       return;
     }
@@ -129,23 +129,29 @@ export default function RegisterPage() {
               </div>
             </div>
 
-            {/* Bill Amount Input */}
-            <div className="bg-[#191d29] border border-[#D4AF37]/40 rounded-xl p-1.5 px-3 focus-within:border-[#D4AF37] transition shadow-inner">
-              <label className="block text-[9px] text-[#D4AF37] font-medium tracking-wide">
-                Bill Amount <span className="text-red-500">*</span> <span className="text-[8px] text-gray-400">(Min ₹3,999)</span>
-              </label>
-              <div className="flex items-center space-x-2 mt-0.5">
-                <Coins size={14} className="text-[#D4AF37]/70 shrink-0" />
-                <input
-                  type="number"
-                  min="3999"
-                  placeholder="Enter bill amount (e.g. 4000)"
-                  value={formData.billAmount}
-                  onChange={(e) => setFormData({ ...formData, billAmount: e.target.value })}
-                  className="w-full bg-transparent text-xs text-white placeholder-gray-500 focus:outline-none"
-                />
-              </div>
-            </div>
+           {/* Bill Amount Input */}
+<div className="bg-[#191d29] border border-[#D4AF37]/40 rounded-xl p-1.5 px-3 focus-within:border-[#D4AF37] transition shadow-inner">
+  <label className="block text-[9px] text-[#D4AF37] font-medium tracking-wide">
+    Bill Amount <span className="text-red-500">*</span>
+  </label>
+
+  <div className="flex items-center space-x-2 mt-0.5">
+    <Coins size={14} className="text-[#D4AF37]/70 shrink-0" />
+
+    <input
+      type="number"
+      min="1"
+      step="0.01"
+      placeholder="Please enter the valid bill amount"
+      value={formData.billAmount}
+      onChange={(e) =>
+        setFormData({ ...formData, billAmount: e.target.value })
+      }
+      className="w-full bg-transparent text-xs text-white placeholder-gray-500 focus:outline-none"
+      required
+    />
+  </div>
+</div>
 
             {/* Store Name Input */}
             <div className="bg-[#191d29] border border-[#D4AF37]/40 rounded-xl p-1.5 px-3 focus-within:border-[#D4AF37] transition shadow-inner">
